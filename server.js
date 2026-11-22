@@ -1,286 +1,216 @@
 'use strict';
-// Maapokeri: palvelimen hallitsema peli. Ei ulkoisia npm-riippuvuuksia.
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const {newDeck, evaluateHand, compareScores} = require('./engine');
-
 const PORT = Number(process.env.PORT || 3000);
 const TURN_MS = Number(process.env.TURN_MS || 30000);
-const MAX_ROOMS = 500;
-const ROOM_TTL = 24 * 60 * 60 * 1000;
 const rooms = new Map();
-const publicDir = path.join(__dirname, 'public');
 const codeChars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const suitMarks = {S:'♠',H:'♥',D:'♦',C:'♣'};
-const shortName = card => card.joker ? 'Jokeri' : `${{11:'J',12:'Q',13:'K',14:'A'}[card.rank]||card.rank}${suitMarks[card.suit]}`;
-
-function fail(message, status=400) {const err = new Error(message); err.status=status; throw err;}
-function newCode() {
-  for (let j=0;j<30;j++) {
-    const code=Array.from({length:6},()=>codeChars[crypto.randomInt(codeChars.length)]).join('');
-    if(!rooms.has(code))return code;
-  }
-  fail('Huonekoodia ei voitu luoda.',500);
-}
-function cleanName(input) {
-  if (typeof input!=='string') fail('Kirjoita pelaajan nimi.');
-  const name=input.trim().replace(/[\x00-\x1f\x7f]/g,'').slice(0,24);
+const label = c => c.joker ? 'Jokeri' : `${{11:'J',12:'Q',13:'K',14:'A'}[c.rank]||c.rank}${suitMarks[c.suit]}`;
+const pub = c => c ? {rank:c.rank,suit:c.suit,joker:c.joker} : null;
+const openCount = p => p.cards.filter(c=>c.faceUp).length;
+const token = () => crypto.randomBytes(24).toString('base64url');
+function fail(message,status=400){throw Object.assign(new Error(message),{status});}
+function nameOf(value){
+  const name=typeof value==='string'?value.trim().replace(/[\x00-\x1f\x7f]/g,'').slice(0,24):'';
   if(!name)fail('Kirjoita pelaajan nimi.');
   return name;
 }
-function token() {return crypto.randomBytes(24).toString('base64url');}
-function visibleCount(p) {return p.cards.filter(c=>c.faceUp).length;}
-function allDone(g) {return g.players.every(p=>visibleCount(p)===5);}
-function appendLog(g,msg) {g.history.unshift(msg);g.history.length=Math.min(10,g.history.length);}
-function playerByToken(g, auth) {const p=g.players.find(p=>p.token===auth);if(!p)fail('Pääsy huoneeseen ei ole voimassa.',403);return p;}
-function getRoom(code) {const g=rooms.get(String(code||'').toUpperCase());if(!g)fail('Huonetta ei löytynyt.',404);return g;}
-function onlineCount(g,pid) {return [...g.subscribers].filter(s=>s.playerId===pid).length;}
-function sessionState(g,viewer) {
-  const playing=g.phase!=='lobby';
+function newCode(){
+  for(let i=0;i<30;i++){
+    const code=Array.from({length:6},()=>codeChars[crypto.randomInt(codeChars.length)]).join('');
+    if(!rooms.has(code))return code;
+  }
+  fail('Huonekoodin luominen epäonnistui.',503);
+}
+function roomOf(code){const g=rooms.get(String(code||'').toUpperCase());if(!g)fail('Huonetta ei löytynyt.',404);return g;}
+function auth(room,t){const g=roomOf(room),p=g.players.find(p=>p.token===t);if(!p)fail('Pääsy huoneeseen ei ole voimassa.',403);return {g,p};}
+function log(g,line){g.history.unshift(line);g.history.length=Math.min(g.history.length,10);}
+function sessionState(g,viewer){
+  const dealt=g.phase!=='lobby';
   return {
-    code:g.code,phase:g.phase,maxPlayers:g.maxPlayers,hostId:g.hostId,
-    dealerId:g.dealerId,activeId:playing ? g.players[g.active]?.id : null,
-    stage:playing ? g.stage : null,
-    deadline:g.phase==='playing'?g.deadline:null,
-    turnSeconds:TURN_MS/1000,serverNow:Date.now(),turns:g.turns,
-    me:{id:viewer.id,name:viewer.name},
-    players:g.players.map(p=>({id:p.id,name:p.name,
-      cards:playing?p.cards.map(c=>c.faceUp?publicCard(c):null):[],
-      open:playing?visibleCount(p):0,
-      online:onlineCount(g,p.id)>0,
-    })),
-    stockCount:playing?g.stock.length:null,
-    discardTop:playing&&g.discard.length?publicCard(g.discard.at(-1)):null,
-    discardCount:playing?g.discard.length:null,
-    pending:(g.phase==='playing'&&g.players[g.active].id===viewer.id&&g.pending)
-      ?publicCard(g.pending.card):null,
-    pendingPresent:g.phase==='playing'&&Boolean(g.pending),
-    history:playing?g.history:[],
-    ranking:g.phase==='done'?g.ranking:null,
+    code:g.code,phase:g.phase,maxPlayers:g.maxPlayers,hostId:g.hostId,dealerId:g.dealerId,
+    activeId:g.phase==='playing'?g.players[g.active].id:null,stage:g.stage,
+    deadline:g.phase==='playing'?g.deadline:null,turnSeconds:TURN_MS/1000,serverNow:Date.now(),
+    turns:g.turns,handId:g.handId,revision:g.revision,me:{id:viewer.id,name:viewer.name},
+    players:g.players.map(p=>({id:p.id,name:p.name,cards:dealt?p.cards.map(c=>c.faceUp?pub(c):null):[],
+      open:dealt?openCount(p):0,online:[...g.subscribers].some(s=>s.playerId===p.id)})),
+    stockCount:dealt?g.stock.length:null,discardCount:dealt?g.discard.length:null,
+    discardTop:dealt?pub(g.discard.at(-1)):null,
+    pending:g.phase==='playing'&&g.pending?pub(g.pending.card):null,
+    pendingPresent:g.phase==='playing'&&!!g.pending,
+    pendingSource:g.pending?.source||null,intent:g.intent,
+    history:dealt?g.history:[],ranking:g.phase==='done'?g.ranking:null,
+    chat:g.chat
   };
 }
-function publicCard(c) {return c?{rank:c.rank,suit:c.suit,joker:c.joker}:null;}
-function broadcast(g) {
-  for(const client of [...g.subscribers]) {
-    try {
-      const p=g.players.find(p=>p.id===client.playerId);
-      if(!p)continue;
-      client.res.write(`event: state\ndata: ${JSON.stringify(sessionState(g,p))}\n\n`);
-    }catch {g.subscribers.delete(client);}
+function broadcast(g){
+  g.revision++;
+  for(const client of [...g.subscribers]){
+    const p=g.players.find(p=>p.id===client.playerId);
+    if(!p||client.res.destroyed){g.subscribers.delete(client);continue;}
+    try{client.res.write('event: state\ndata: '+JSON.stringify(sessionState(g,p))+'\n\n');}
+    catch{g.subscribers.delete(client);}
   }
 }
-function makeRoom({name,maxPlayers}) {
-  if(rooms.size>=MAX_ROOMS)fail('Palvelin on täynnä. Kokeile myöhemmin.',503);
-  const cap=Number(maxPlayers);
-  if(!Number.isInteger(cap)||cap<2||cap>6)fail('Huoneen pelaajamäärän tulee olla 2–6.');
-  const host={id:crypto.randomUUID(),name:cleanName(name),token:token(),cards:[]};
-  const g={code:newCode(),phase:'lobby',maxPlayers:cap,players:[host],hostId:host.id,dealerId:host.id,
-    subscribers:new Set(),stock:[],discard:[],active:0,stage:null,pending:null,intent:null,
-    deadline:null,timer:null,history:[],turns:0,ranking:null,updated:Date.now()};
-  rooms.set(g.code,g);
-  return {code:g.code,token:host.token,playerId:host.id};
+function player(name){return {id:crypto.randomUUID(),name:nameOf(name),token:token(),cards:[],lastChat:0};}
+function create(body){
+  if(rooms.size>=500)fail('Palvelin on täynnä.',503);
+  const maxPlayers=Number(body.maxPlayers);
+  if(!Number.isInteger(maxPlayers)||maxPlayers<2||maxPlayers>6)fail('Pelaajamäärä on 2–6.');
+  const p=player(body.name);
+  const g={code:newCode(),phase:'lobby',stage:null,maxPlayers,hostId:p.id,dealerId:p.id,players:[p],
+    stock:[],discard:[],active:0,deadline:null,timer:null,pending:null,intent:null,turns:0,handId:0,
+    ranking:null,history:[],chat:[],chatSeq:0,revision:0,subscribers:new Set(),updated:Date.now()};
+  rooms.set(g.code,g);return {code:g.code,token:p.token,playerId:p.id};
 }
-function joinRoom({code,name}) {
-  const g=getRoom(code);
-  if(g.phase!=='lobby')fail('Peli on jo alkanut. Et voi liittyä uutena pelaajana.',409);
+function join(body){
+  const g=roomOf(body.code);
+  if(g.phase!=='lobby')fail('Peli on jo alkanut.',409);
   if(g.players.length>=g.maxPlayers)fail('Huone on täynnä.',409);
-  const p={id:crypto.randomUUID(),name:cleanName(name),token:token(),cards:[]};
-  g.players.push(p);g.updated=Date.now();broadcast(g);
+  const p=player(body.name);g.players.push(p);g.updated=Date.now();broadcast(g);
   return {code:g.code,token:p.token,playerId:p.id};
 }
-function putBackAndDraw(g) {
-  if(g.pending) {
-    g.discard.push(g.pending.card);
-    g.pending=null;
+function draw(g){
+  if(!g.stock.length&&g.discard.length>1){
+    const top=g.discard.pop();g.stock=g.discard;g.discard=[top];
+    for(let i=g.stock.length-1;i>0;i--){const j=crypto.randomInt(i+1);[g.stock[i],g.stock[j]]=[g.stock[j],g.stock[i]];}
+    log(g,'Avopakan alemmat kortit sekoitettiin nostopakaksi.');
   }
-  const fresh=drawStock(g);
-  if(fresh)g.discard.push(fresh);
+  return g.stock.pop()||null;
 }
-function refill(g) {
-  if(g.stock.length || g.discard.length<=1) return;
-  const top=g.discard.pop();
-  g.stock=g.discard;
-  for(let i=g.stock.length-1;i>0;i--) {
-    const j=crypto.randomInt(i+1);
-    [g.stock[i],g.stock[j]]=[g.stock[j],g.stock[i]];
-  }
-  g.discard=[top];
-  appendLog(g,'Avopakan alemmat kortit sekoitettiin nostopakaksi.');
-}
-function drawStock(g) {refill(g);return g.stock.pop()||null;}
-function finish(g) {
-  g.phase='done';g.stage='done';g.deadline=null;g.pending=null;g.intent=null;
-  clearTimeout(g.timer);g.timer=null;
-  const order=g.players.map(p=>({id:p.id,name:p.name,score:evaluateHand(p.cards),cards:p.cards.map(publicCard)}))
-    .sort((a,b)=>compareScores(b.score,a.score));
-  g.ranking=order.map((x,i)=>({id:x.id,name:x.name,hand:x.score.label,tie:x.score.tie,
-    winner:compareScores(x.score,order[0].score)===0,cards:x.cards,place:1+order.filter(y=>compareScores(y.score,x.score)>0).length}));
-  appendLog(g, 'Peli päättyi – kaikki kortit ovat auki.');
-}
-function nextOpenPlayer(g) {
-  for(let shift=1;shift<=g.players.length;shift++) {
-    const idx=(g.active+shift)%g.players.length;
-    if(visibleCount(g.players[idx])<5)return idx;
-  }
-  return -1;
-}
-function completeTurn(g) {
-  g.turns++;
-  g.pending=null;g.intent=null;
-  if(allDone(g)) {finish(g);return;}
-  const next=nextOpenPlayer(g);
-  if(next<0) {finish(g);return;}
-  beginTurn(g,next);
-}
-function beginTurn(g,idx) {
-  clearTimeout(g.timer);
-  g.active=idx;g.stage='select';g.deadline=Date.now()+TURN_MS;
-  g.timer=setTimeout(()=>{
-    if(g.phase==='playing'&&Date.now()>=g.deadline){autoFlip(g);broadcast(g);}
-  },TURN_MS+10);
-  // An active room should not prevent process termination during tests.
+function begin(g,index){
+  clearTimeout(g.timer);g.active=index;g.stage='select';g.deadline=Date.now()+TURN_MS;
+  g.timer=setTimeout(()=>{if(g.phase==='playing'){autoFlip(g);broadcast(g);}},TURN_MS);
   g.timer.unref();
 }
-function autoFlip(g) {
-  const p=g.players[g.active];
-  const slot=p.cards.findIndex(c=>!c.faceUp);
-  if(slot<0){completeTurn(g);return;}
-  putBackAndDraw(g);
-  p.cards[slot].faceUp=true;
-  appendLog(g,`${p.name}: 30 sekuntia kului. Kortti ${slot+1} (${shortName(p.cards[slot])}) kääntyi automaattisesti.`);
-  completeTurn(g);g.updated=Date.now();
+function finish(g){
+  clearTimeout(g.timer);g.timer=null;g.phase='done';g.stage='done';g.deadline=null;g.pending=null;g.intent=null;
+  const ordered=g.players.map(p=>({p,score:evaluateHand(p.cards)})).sort((a,b)=>compareScores(b.score,a.score));
+  g.ranking=ordered.map(({p,score})=>({id:p.id,name:p.name,hand:score.label,cards:p.cards.map(pub),
+    place:1+ordered.filter(a=>compareScores(a.score,score)>0).length,winner:compareScores(score,ordered[0].score)===0}));
+  log(g,'Kaikki kortit ovat auki. Peli päättyi.');
 }
-function start(g,actor) {
-  if(actor.id!==g.hostId)fail('Vain huoneen luoja voi aloittaa pelin.',403);
-  if(g.phase!=='lobby')fail('Peli on jo käynnissä.',409);
-  if(g.players.length<2)fail('Peliin tarvitaan vähintään kaksi pelaajaa.',409);
-  const cards=newDeck();
-  g.players.forEach(p=>{p.cards=Array.from({length:5},()=>({...cards.pop(),faceUp:false}));});
-  g.discard=[cards.pop()];g.stock=cards;g.turns=0;g.phase='playing';g.history=[];g.ranking=null;
-  appendLog(g,`Aloituskortti: ${shortName(g.discard[0])}. Jakaja aloittaa.`);
-  beginTurn(g,g.players.findIndex(p=>p.id===g.dealerId));
+function complete(g){
+  g.pending=null;g.intent=null;g.turns++;
+  if(g.players.every(p=>openCount(p)===5)){finish(g);return;}
+  for(let i=1;i<=g.players.length;i++){
+    const index=(g.active+i)%g.players.length;
+    if(openCount(g.players[index])<5){begin(g,index);return;}
+  }
 }
-function action(g,actor,type,payload) {
-  if(type==='dealer') {
-    if(g.phase!=='lobby')fail('Jakajaa voi vaihtaa vain odotushuoneessa.',409);
-    if(actor.id!==g.hostId)fail('Vain huoneen luoja voi valita jakajan.',403);
-    if(!g.players.some(p=>p.id===payload.playerId))fail('Pelaajaa ei löydy.');
-    g.dealerId=payload.playerId;
-  } else if(type==='start') {
-    start(g,actor);
-  } else if(type==='again') {
-    if(actor.id!==g.hostId)fail('Vain huoneen luoja voi aloittaa uuden jaon.',403);
-    if(g.phase!=='done')fail('Uuden jaon voi aloittaa vasta pelin päätyttyä.',409);
-    g.phase='lobby';g.stage=null;g.stock=[];g.discard=[];g.deadline=null;g.history=[];
-    g.ranking=null;g.players.forEach(p=>p.cards=[]);
-  } else {
+function autoFlip(g){
+  const p=g.players[g.active],slot=p.cards.findIndex(c=>!c.faceUp);
+  // Jos nostettu kortti oli nostopakasta, hylätään juuri se — ei nosteta toista.
+  if(g.pending?.source==='stock')g.discard.push(g.pending.card);
+  else{
+    if(g.pending?.source==='discard')g.discard.push(g.pending.card);
+    const c=draw(g);if(c)g.discard.push(c);
+  }
+  if(slot>=0){p.cards[slot].faceUp=true;log(g,`${p.name}: aika loppui. ${label(p.cards[slot])} kääntyi automaattisesti.`);}
+  complete(g);g.updated=Date.now();
+}
+function start(g,p){
+  if(p.id!==g.hostId)fail('Vain järjestäjä voi aloittaa.',403);
+  if(g.phase!=='lobby'||g.players.length<2)fail('Tarvitaan vähintään kaksi pelaajaa odotushuoneeseen.',409);
+  const deck=newDeck();
+  for(const pl of g.players)pl.cards=Array.from({length:5},()=>({...deck.pop(),faceUp:false}));
+  g.discard=[deck.pop()];g.stock=deck;g.phase='playing';g.handId++;g.turns=0;g.history=[];g.ranking=null;g.pending=null;g.intent=null;
+  log(g,'Uusi jako. Jakaja aloittaa.');begin(g,g.players.findIndex(pl=>pl.id===g.dealerId));
+}
+function action(g,p,b){
+  const type=b.type;
+  if(type==='chat'){
+    const message=typeof b.message==='string'?b.message.trim().replace(/[\x00-\x1f\x7f]/g,' ').slice(0,300):'';
+    if(!message)fail('Kirjoita viesti.');
+    if(Date.now()-p.lastChat<500)fail('Odota hetki ennen uutta viestiä.',429);
+    p.lastChat=Date.now();g.chat.push({id:++g.chatSeq,playerId:p.id,name:p.name,message,time:Date.now()});
+    if(g.chat.length>100)g.chat.shift();
+  }else if(type==='start')start(g,p);
+  else if(type==='dealer'){
+    if(g.phase!=='lobby'||p.id!==g.hostId)fail('Jakajaa ei voi vaihtaa.',403);
+    if(!g.players.some(x=>x.id===b.playerId))fail('Pelaajaa ei löydy.');
+    g.dealerId=b.playerId;
+  }else if(type==='again'){
+    if(g.phase!=='done'||p.id!==g.hostId)fail('Uusi jako ei ole mahdollinen.',409);
+    g.phase='lobby';g.stage=null;g.stock=[];g.discard=[];g.history=[];g.ranking=null;
+    g.players.forEach(p=>p.cards=[]);
+  }else{
     if(g.phase!=='playing')fail('Peli ei ole käynnissä.',409);
-    if(g.players[g.active].id!==actor.id)fail('Ei ole sinun vuorosi.',403);
-    if(Date.now()>=g.deadline) {
-      autoFlip(g);broadcast(g);fail('Vuoro ehti päättyä. Pimeä kortti kääntyi automaattisesti.',409);
-    }
-    if(type==='take') {
-      if(g.stage!=='select')fail('Valinta ei ole nyt mahdollinen.',409);
-      const picked=g.discard.pop();if(!picked)fail('Avopakka on tyhjä.',409);
-      g.pending={card:picked,source:'discard'};g.stage='choose';g.intent='swap';
-    } else if(type==='draw'||type==='flip') {
-      if(g.stage!=='select')fail('Valinta ei ole nyt mahdollinen.',409);
-      const picked=drawStock(g);if(!picked)fail('Nostopakassa ei ole kortteja.',409);
-      g.pending={card:picked,source:'stock'};g.stage=type==='draw'?'decide':'choose';g.intent=type==='flip'?'flip':null;
-    } else if(type==='intent') {
-      if(g.stage!=='decide')fail('Valinta ei ole nyt mahdollinen.',409);
-      if(!['swap','flip'].includes(payload.intent))fail('Tuntematon toiminto.');
-      g.stage='choose';g.intent=payload.intent;
-    } else if(type==='slot') {
-      if(g.stage!=='choose'||!g.pending)fail('Valinta ei ole nyt mahdollinen.',409);
-      const idx=payload.slot;
-      if(!Number.isInteger(idx)||idx<0||idx>4)fail('Valitse jokin viidestä kortista.');
-      const old=actor.cards[idx];
-      if(old.faceUp)fail('Voit valita vain pimeän kortin.',409);
-      if(g.intent==='swap') {
-        actor.cards[idx]={...g.pending.card,faceUp:true};
-        g.discard.push(old);
-        appendLog(g,`${actor.name} vaihtoi kortin ${shortName(actor.cards[idx])} paikalle ${idx+1}; ${shortName(old)} meni avopakkaan.`);
-      } else if(g.intent==='flip') {
-        old.faceUp=true;g.discard.push(g.pending.card);
-        appendLog(g,`${actor.name} käänsi kortin ${idx+1} (${shortName(old)}); nostettu kortti meni avopakkaan.`);
-      } else fail('Kortin käyttöä ei valittu.',409);
-      completeTurn(g);
-    } else fail('Tuntematon toiminto.');
+    if(p.id!==g.players[g.active].id)fail('Ei ole sinun vuorosi.',403);
+    if(b.handId!==undefined&&b.handId!==g.handId||b.turn!==undefined&&b.turn!==g.turns)fail('Vuoro on jo vaihtunut.',409);
+    if(Date.now()>=g.deadline){autoFlip(g);broadcast(g);fail('Aika loppui.',409);}
+    if(type==='take'||type==='draw'||type==='flip'){
+      if(g.stage!=='select')fail('Olet jo nostanut kortin.',409);
+      const c=type==='take'?g.discard.pop():draw(g);
+      if(!c)fail('Pakassa ei ole kortteja.',409);
+      g.pending={card:c,source:type==='take'?'discard':'stock'};
+      g.intent=type==='take'?'swap':type==='flip'?'flip':null;
+      g.stage=type==='draw'?'decide':'choose';
+    }else if(type==='intent'){
+      if(g.stage!=='decide'||!['swap','flip'].includes(b.intent))fail('Valinta ei ole mahdollinen.',409);
+      g.intent=b.intent;g.stage='choose';
+    }else if(type==='slot'){
+      if(g.stage!=='choose'||!g.pending||!Number.isInteger(b.slot)||b.slot<0||b.slot>4)fail('Valitse pimeä kortti.',409);
+      const old=p.cards[b.slot];if(old.faceUp)fail('Kortti on jo auki.',409);
+      if(g.intent==='swap'){
+        p.cards[b.slot]={...g.pending.card,faceUp:true};g.discard.push(old);
+        log(g,`${p.name} vaihtoi kortin: ${label(p.cards[b.slot])}.`);
+      }else if(g.intent==='flip'){
+        old.faceUp=true;g.discard.push(g.pending.card);log(g,`${p.name} käänsi kortin: ${label(old)}.`);
+      }else fail('Valitse ensin kortin käyttö.');
+      complete(g);
+    }else fail('Tuntematon toiminto.');
   }
   g.updated=Date.now();broadcast(g);
 }
-function readBody(req) {
-  return new Promise((resolve,reject)=>{
-    let raw='';
-    req.on('data',part=>{raw+=part;if(raw.length>16000){reject(Object.assign(new Error('Liian suuri pyyntö.'),{status:413}));req.destroy();}});
-    req.on('end',()=>{try{resolve(JSON.parse(raw));}catch{reject(Object.assign(new Error('Virheellinen pyyntö.'),{status:400}));}});
-    req.on('error',reject);
-  });
+function json(res,status,data){res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'});res.end(JSON.stringify(data));}
+function bodyOf(req){return new Promise((resolve,reject)=>{
+  let raw='';req.on('data',s=>{raw+=s;if(raw.length>16000){reject(Object.assign(new Error('Liian suuri pyyntö.'),{status:413}));req.destroy();}});
+  req.on('end',()=>{try{const b=JSON.parse(raw);if(!b||typeof b!=='object')throw Error();resolve(b);}catch{reject(Object.assign(new Error('Virheellinen pyyntö.'),{status:400}));}});
+  req.on('error',reject);
+});}
+function stream(req,res,g,p){
+  res.writeHead(200,{'Content-Type':'text/event-stream; charset=utf-8','Cache-Control':'no-cache, no-transform','Connection':'keep-alive','X-Accel-Buffering':'no'});
+  res.write('retry: 1200\n\n');const client={playerId:p.id,res};g.subscribers.add(client);broadcast(g);
+  const interval=setInterval(()=>{if(!res.destroyed)res.write(': ping\n\n');},15000);interval.unref();
+  res.on('close',()=>{clearInterval(interval);g.subscribers.delete(client);broadcast(g);});
 }
-function json(res,status,data) {
-  res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'});
-  res.end(JSON.stringify(data));
-}
-function authenticated(payload) {
-  const g=getRoom(payload.room);
-  const p=playerByToken(g,payload.token);
-  return {g,p};
-}
-function stream(req,res,url) {
-  const {g,p}=authenticated({room:url.searchParams.get('room'),token:url.searchParams.get('token')});
-  res.writeHead(200,{'Content-Type':'text/event-stream; charset=utf-8','Cache-Control':'no-cache, no-transform',
-    'Connection':'keep-alive','X-Accel-Buffering':'no','X-Content-Type-Options':'nosniff'});
-  res.write('retry: 1500\n\n');
-  const client={playerId:p.id,res};
-  g.subscribers.add(client);
-  res.write(`event: state\ndata: ${JSON.stringify(sessionState(g,p))}\n\n`);
-  broadcast(g); // päivitä läsnäolo myös muille pelaajille
-  const heartbeat=setInterval(()=>{try {res.write(': ping\n\n');}catch {clearInterval(heartbeat);}},15000);
-  heartbeat.unref();
-  req.on('close',()=>{clearInterval(heartbeat);g.subscribers.delete(client);broadcast(g);});
-}
-const mime={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml'};
-function serve(res,url) {
-  const pathname=url.pathname==='/'?'/index.html':url.pathname;
-  if(!['/index.html','/app.js','/style.css'].includes(pathname)) {json(res,404,{error:'Tiedostoa ei löydy.'});return;}
-  const file=path.join(publicDir,pathname.slice(1));
-  fs.readFile(file,(err,buf)=>{
-    if(err){json(res,500,{error:'Palvelinvirhe.'});return;}
-    res.writeHead(200,{'Content-Type':mime[path.extname(file)],'Cache-Control':'no-cache','X-Content-Type-Options':'nosniff','Content-Security-Policy':"default-src 'self'; connect-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'"});
+const files={'/':'index.html','/index.html':'index.html','/app.js':'app.js','/style.css':'style.css'};
+const mime={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8'};
+function serve(res,pathname){
+  const f=files[pathname];if(!f)return json(res,404,{error:'Tiedostoa ei löydy.'});
+  fs.readFile(path.join(__dirname,'public',f),(err,buf)=>{
+    if(err){console.error('Puuttuva tiedosto:',f,err.message);return json(res,500,{error:'Palvelinvirhe: käyttöliittymän tiedosto puuttuu.'});}
+    res.writeHead(200,{'Content-Type':mime[path.extname(f)],'Cache-Control':'no-cache','X-Content-Type-Options':'nosniff',
+      'Content-Security-Policy':"default-src 'self'; connect-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'"});
     res.end(buf);
   });
 }
 const server=http.createServer(async(req,res)=>{
-  try {
-    const url=new URL(req.url,'http://localhost');
-    if(req.method==='GET'&&url.pathname==='/api/events')return stream(req,res,url);
-    if(req.method==='GET'&&url.pathname==='/api/state') {
-      const {g,p}=authenticated({room:url.searchParams.get('room'),token:url.searchParams.get('token')});
-      return json(res,200,sessionState(g,p));
+  try{
+    const u=new URL(req.url,'http://localhost'),p=u.pathname;
+    if(req.method==='GET'&&p==='/health')return json(res,200,{ok:true});
+    if(req.method==='GET'&&(p==='/api/state'||p==='/api/events')){
+      const {g,p:viewer}=auth(u.searchParams.get('room'),u.searchParams.get('token'));
+      return p==='/api/events'?stream(req,res,g,viewer):json(res,200,sessionState(g,viewer));
     }
-    if(req.method==='POST'&&url.pathname.startsWith('/api/')) {
+    if(req.method==='POST'&&p.startsWith('/api/')){
       if(!String(req.headers['content-type']||'').startsWith('application/json'))fail('Lähetä JSON-pyyntö.',415);
-      const body=await readBody(req);
-      if(url.pathname==='/api/create')return json(res,200,makeRoom(body));
-      if(url.pathname==='/api/join')return json(res,200,joinRoom(body));
-      if(url.pathname==='/api/action'){
-        const {g,p}=authenticated(body);action(g,p,body.type,body);
-        return json(res,200,{ok:true});
-      }
+      const b=await bodyOf(req);
+      if(p==='/api/create')return json(res,200,create(b));
+      if(p==='/api/join')return json(res,200,join(b));
+      if(p==='/api/action'){const {g,p:viewer}=auth(b.room,b.token);action(g,viewer,b);return json(res,200,{ok:true});}
       return json(res,404,{error:'Tuntematon osoite.'});
     }
-    if(req.method==='GET')return serve(res,url);
+    if(req.method==='GET')return serve(res,p);
     json(res,405,{error:'Toiminto ei ole sallittu.'});
-  }catch(err){if(!res.headersSent)json(res,err.status||500,{error:err.status?err.message:'Palvelimen sisäinen virhe.'});}
+  }catch(e){if(!res.headersSent){if(!e.status)console.error(e);json(res,e.status||500,{error:e.status?e.message:'Palvelimen sisäinen virhe.'});}}
 });
-// Unohda käyttämättömät pelihuoneet. Palvelimen uudelleenkäynnistys tyhjentää huoneet.
-const cleanup=setInterval(()=>{
-  const now=Date.now();
-  for(const [code,g] of rooms)if(now-g.updated>ROOM_TTL&&g.subscribers.size===0){clearTimeout(g.timer);rooms.delete(code);}
-},60*60*1000);
+const cleanup=setInterval(()=>{for(const [code,g] of rooms)if(!g.subscribers.size&&Date.now()-g.updated>86400000){clearTimeout(g.timer);rooms.delete(code);}},3600000);
 cleanup.unref();
-if(require.main===module)server.listen(PORT,'0.0.0.0',()=>console.log(`Maapokeri: http://localhost:${PORT}`));
-module.exports={server,rooms,action,autoFlip,makeRoom,joinRoom,sessionState};
+if(require.main===module)server.listen(PORT,'0.0.0.0',()=>console.log('Maapokeri 2.0: portti '+PORT));
+module.exports={server,rooms,sessionState,autoFlip};
