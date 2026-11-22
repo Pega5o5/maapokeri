@@ -160,3 +160,60 @@ input,select{background:#062521;border:1px solid #789b87;color:white;border-radi
 @media(min-width:700px) and (min-height:701px){.game-screen{--mini-w:clamp(35px,5.5vw,55px)}.players-2{--mini-w:76px}.players-3{--mini-w:62px}.players-4{--mini-w:48px}.rival-cards{gap:7px}.own-cards{gap:16px}}
 @media(max-width:340px){.room-chip{font-size:.56rem}.brand small{display:none}.header-tools{gap:4px}.piles{gap:8px}.controls.done{gap:5px}.controls.done .btn{font-size:.66rem;padding:7px}.own-cards{gap:6px}}
 @media(prefers-reduced-motion:reduce){.turning,.flip-back{animation:none!important}.flip-back{display:none}.time-track i{transition:none!important}}
+
+.card-face {
+  color-scheme: only light;
+  background: #fffdf6;
+  background-image: linear-gradient(#fffdf6,#fffdf6);
+  color: #172322;
+  font-family: Arial, sans-serif;
+}
+
+.card-face.red {
+  color: #bf1937;
+}
+
+.card-face .corner:not(.bottom) {
+  position: absolute;
+  inset: 3% 4%;
+  display: grid;
+  grid-template-rows: 1fr 1fr;
+  place-items: center;
+  line-height: 1;
+}
+
+.card-face .corner b {
+  font-size: .60em;
+  font-weight: 800;
+  letter-spacing: -.04em;
+}
+
+.card-face .corner small {
+  font-size: .70em;
+  line-height: .86;
+}
+
+.card-face .corner.bottom,
+.card-face .card-center,
+.card-face .joker-emblem {
+  display: none;
+}
+
+.card-face.joker .corner:not(.bottom) {
+  inset: 10% 4% 30%;
+  grid-template-rows: 1fr;
+}
+
+.card-face.joker .corner b {
+  font-size: .83em;
+}
+
+.card-face.joker .corner small {
+  display: none;
+}
+
+.joker-caption {
+  bottom: 10%;
+  font-size: .20em;
+  letter-spacing: 0;
+}
