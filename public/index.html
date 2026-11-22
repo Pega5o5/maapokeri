@@ -1,16 +1,20 @@
 <!doctype html>
 <html lang="fi">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="theme-color" content="#062c27" />
-  <meta name="description" content="Maapokeri netissä: pelaa kavereiden kanssa omilla puhelimilla, 30 sekuntia per vuoro." />
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#082a25">
   <title>Maapokeri – verkkopeli</title>
-  <link rel="stylesheet" href="/style.css" />
+  <link rel="stylesheet" href="/style.css">
   <script src="/app.js" defer></script>
 </head>
 <body>
-  <main id="app" aria-live="off"><div class="loading">♠ Maapokeri käynnistyy…</div></main>
-  <div id="toast" role="status" aria-live="polite"></div>
+  <main id="app"><div class="loading">♠ Maapokeri käynnistyy…</div></main>
+  <aside id="chat-panel" hidden aria-label="Pelihuoneen chat">
+    <header class="chat-header"><div><strong>Pöytäpuhe</strong><small id="chat-room"></small></div><button id="chat-close" class="icon-btn" aria-label="Sulje chat">×</button></header>
+    <div id="chat-messages" role="log" aria-live="polite"></div>
+    <form id="chat-form"><input id="chat-input" placeholder="Kirjoita viesti…" maxlength="300" autocomplete="off" aria-label="Chatviesti"><button class="btn gold" type="submit">Lähetä</button></form>
+  </aside>
+  <div id="toast" role="status"></div>
 </body>
 </html>
